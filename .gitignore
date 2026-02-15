@@ -1,0 +1,8 @@
+__pycache__
+venv
+.python-version
+images
+max_profile
+*.png
+DS_Store
+.env
