@@ -11,3 +11,4 @@ logs/
 state/
 *.bak-*
 *.before-recycle
+alert.env
