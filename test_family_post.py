@@ -5,7 +5,7 @@ Run: venv/bin/python -m unittest test_family_post -v
 import os
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from unittest import mock
 
 import family_chat_with_pic as f
@@ -144,6 +144,80 @@ class Extras(unittest.TestCase):
     def test_holiday_in_date_line(self):
         with mock.patch.object(extras, "_moscow_now", return_value=datetime(2026, 5, 9, 6)):
             self.assertIn("День Победы", extras.date_line())
+
+
+class Movable(unittest.TestCase):
+    def test_orthodox_easter_known_years(self):
+        for y, d in [(2024, date(2024, 5, 5)), (2025, date(2025, 4, 20)), (2026, date(2026, 4, 12)),
+                     (2027, date(2027, 5, 2)), (2030, date(2030, 4, 28))]:
+            self.assertEqual(extras.orthodox_easter(y), d)
+
+    def test_maslenitsa_week_2026(self):
+        self.assertEqual(extras.movable_holiday(date(2026, 2, 16))[0], "Масленица: Встреча")
+        self.assertEqual(extras.movable_holiday(date(2026, 2, 22))[0], "Масленица: Прощёное воскресенье")
+        self.assertIsNone(extras.movable_holiday(date(2026, 2, 23)))   # Clean Monday
+
+    def test_easter_and_trinity_in_date_line(self):
+        with mock.patch.object(extras, "_moscow_now", return_value=datetime(2026, 4, 12, 6)):
+            self.assertIn("Пасха", extras.date_line())
+        with mock.patch.object(extras, "_moscow_now", return_value=datetime(2026, 5, 31, 6)):
+            self.assertIn("Троица", extras.date_line())
+
+    def test_photo_topic_on_easter(self):
+        with mock.patch.object(extras, "BIRTHDAYS", {}), \
+                mock.patch.object(extras, "_moscow_now", return_value=datetime(2026, 4, 12, 6)):
+            self.assertEqual(extras.pick_photo_topic(), "easter eggs")
+
+
+class WeatherRules(unittest.TestCase):
+    def test_ice_when_crossing_zero_after_precipitation(self):
+        self.assertTrue(extras.ice_risk([(2.0, 0.4), (-1.0, 0.0)], []))
+
+    def test_no_ice_without_precipitation(self):
+        self.assertFalse(extras.ice_risk([(2.0, 0.0), (-1.0, 0.0)], []))
+
+    def test_no_ice_when_always_above_zero(self):
+        self.assertFalse(extras.ice_risk([(3.0, 2.0), (1.0, 1.0)], []))
+
+    def test_freezing_rain_code_is_ice(self):
+        self.assertTrue(extras.ice_risk([(5.0, 0.0)], [3, 66]))
+
+    def kp(self, values):
+        rows = [{"time_tag": f"2026-11-07T{h:02d}:00:00", "kp": v, "observed": "predicted", "noaa_scale": None}
+                for h, v in zip(range(3, 24, 3), values)]
+        resp = mock.Mock(json=mock.Mock(return_value=rows), raise_for_status=mock.Mock())
+        with mock.patch.object(extras.requests, "get", return_value=resp), \
+                mock.patch.object(extras, "_moscow_now", return_value=datetime(2026, 11, 7, 6)):
+            return extras.kp_line()
+
+    def test_kp_quiet_day_has_no_line(self):
+        self.assertIsNone(self.kp([2.0, 3.33, 3.67]))
+
+    def test_kp_storm_levels(self):
+        self.assertIn("возмущено", self.kp([2.0, 4.0]))
+        self.assertIn("буря: до 5 баллов (G1)", self.kp([4.67]))
+        self.assertIn("G3", self.kp([7.0]))
+
+
+class DayType(unittest.TestCase):
+    def line(self, code, day):
+        resp = mock.Mock(text=code, raise_for_status=mock.Mock())
+        with mock.patch.object(extras.requests, "get", return_value=resp), \
+                mock.patch.object(extras, "_moscow_now", return_value=datetime.combine(day, datetime.min.time())):
+            return extras.day_type_line()
+
+    def test_working_saturday(self):
+        self.assertIn("рабочий день", self.line("0", date(2025, 11, 1)))
+
+    def test_weekday_off(self):
+        self.assertEqual(self.line("1", date(2026, 11, 4)), "🗓 Сегодня выходной день")
+
+    def test_shortened_day(self):
+        self.assertIn("сокращённый", self.line("2", date(2026, 11, 3)))
+
+    def test_ordinary_days_have_no_line(self):
+        self.assertIsNone(self.line("0", date(2026, 11, 9)))   # Monday
+        self.assertIsNone(self.line("1", date(2026, 11, 8)))   # Sunday
 
 
 class Ai(unittest.TestCase):

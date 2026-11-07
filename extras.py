@@ -1,8 +1,9 @@
-"""Extra lines for the morning post: rain, evening temp, pressure, moon, date, FX, birthdays.
+"""Extra lines for the morning post: date, holidays (fixed and Easter-based), day off or working day,
+birthdays, ice warning, rain, evening temp, pressure, magnetic storms, moon, daylight, water, FX.
 
 Every block is independent: if one fails it is skipped, the post is still sent.
 """
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import requests
 import config
@@ -34,13 +35,55 @@ def _moscow_now():
     return datetime.utcnow() + timedelta(hours=3)
 
 
+def orthodox_easter(year):
+    """Orthodox Easter as a Gregorian date (Meeus' Julian algorithm + 13 days, valid 1900-2099)."""
+    a, b, c = year % 4, year % 7, year % 19
+    d = (19 * c + 15) % 30
+    e = (2 * a + 4 * b - d + 34) % 7
+    month, day = divmod(d + e + 114, 31)
+    return date(year, month, day + 1) + timedelta(days=13)
+
+
+MASLENITSA_DAYS = ["Встреча", "Заигрыш", "Лакомка", "Разгуляй",
+                   "Тёщины вечёрки", "Золовкины посиделки", "Прощёное воскресенье"]
+
+
+def movable_holiday(d):
+    """Easter-based holiday on date d as (name, photo topic), or None."""
+    delta = (d - orthodox_easter(d.year)).days
+    if -55 <= delta <= -49:   # the week before Clean Monday (Easter - 48)
+        return f"Масленица: {MASLENITSA_DAYS[delta + 55]}", "russian pancakes blini"
+    return {
+        -7: ("Вербное воскресенье", "willow branches spring"),
+        0: ("Пасха", "easter eggs"),
+        49: ("Троица", "birch forest summer"),
+    }.get(delta)
+
+
 def date_line():
     now = _moscow_now()
     line = f"Сегодня {now.day} {MONTHS[now.month - 1]}, {WEEKDAYS[now.weekday()]}"
-    hol = HOLIDAYS.get((now.month, now.day))
-    if hol:
-        line += f" — {hol}"
+    names = [n for n in ((movable_holiday(now.date()) or (None,))[0],
+                         HOLIDAYS.get((now.month, now.day))) if n]
+    if names:
+        line += " — " + "; ".join(names)
     return line
+
+
+def day_type_line():
+    """Holiday day-off transfers from isdayoff.ru: only unusual days get a line."""
+    d = _moscow_now().date()
+    r = requests.get(f"https://isdayoff.ru/{d:%Y%m%d}?pre=1", timeout=10)
+    r.raise_for_status()
+    code = r.text.strip()   # 0 working, 1 day off, 2 shortened (day before a holiday)
+    weekend = d.weekday() >= 5
+    if code == "0" and weekend:
+        return "🗓 Сегодня рабочий день (перенос выходного)"
+    if code == "1" and not weekend:
+        return "🗓 Сегодня выходной день"
+    if code == "2":
+        return "🗓 Сегодня сокращённый рабочий день"
+    return None
 
 
 def birthday_lines(days_ahead=3):
@@ -75,7 +118,7 @@ def weather_extras():
     """Rain chance, evening temperature, pressure + trend for the first city."""
     city, (lat, lon) = next(iter(config.CITIES.items()))
     url = (f"{config.URL_WEATHER}latitude={lat}&longitude={lon}"
-           f"&hourly=temperature_2m,precipitation_probability,precipitation,surface_pressure"
+           f"&hourly=temperature_2m,precipitation_probability,precipitation,surface_pressure,weathercode"
            f"&timezone=Europe%2FMoscow&past_days=1&forecast_days=1")
     r = requests.get(url, timeout=10)
     r.raise_for_status()
@@ -87,6 +130,12 @@ def weather_extras():
     yday = (_moscow_now() - timedelta(days=1)).strftime("%Y-%m-%d")
     y_morning = next((r_[4] for r_ in allrows if r_[0] == f"{yday}T06:00"), None)
     lines = []
+
+    # Ice: freezing rain today, or the temperature crossed 0°C overnight after rain or snow
+    night = [(tp, pr) for t, tp, _, pr, _ in allrows if f"{yday}T12:00" <= t <= f"{today}T12:00"]
+    codes_today = [c for t, c in zip(h["time"], h["weathercode"]) if t.startswith(today)]
+    if ice_risk(night, codes_today):
+        lines.append("⚠️ Возможен гололёд — осторожно на улице!")
 
     # Rain
     wet = [(t[11:16], pp) for t, _, pp, pr, _ in rows if (pp or 0) >= 50 or (pr or 0) >= 0.2]
@@ -115,8 +164,56 @@ def weather_extras():
             d = mm(morning) - mm(y_morning)
             vs = f", {'+' if d > 0 else ''}{d} к вчера" if d else ", как вчера"
         lines.append(f"🎣 Давление {mm(morning)} мм рт. ст.{vs}{trend}")
-    lines.append(f"🌙 {moon_phase().capitalize()}")
     return lines
+
+
+def ice_risk(night, codes_today):
+    """night: (temperature, precipitation) pairs from yesterday 12:00 to today 12:00."""
+    if any(c in (56, 57, 66, 67) for c in codes_today if c is not None):   # freezing drizzle/rain
+        return True
+    temps = [t for t, _ in night if t is not None]
+    precip = sum(p or 0 for _, p in night)
+    return bool(temps) and min(temps) <= 0 < max(temps) and precip >= 0.3
+
+
+def kp_line():
+    """Planetary Kp from NOAA SWPC; only disturbed days (Kp 4+) get a line."""
+    r = requests.get("https://services.swpc.noaa.gov/products/noaa-planetary-k-index-forecast.json", timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    rows = data if data and isinstance(data[0], dict) else [dict(zip(data[0], row)) for row in data[1:]]
+    today = _moscow_now().date()
+    vals = [float(x["kp"]) for x in rows if x.get("kp") is not None and
+            (datetime.fromisoformat(x["time_tag"][:19]) + timedelta(hours=3)).date() == today]
+    if not vals:
+        return None
+    kp = max(vals)
+    if kp >= 4.67:   # NOAA G1 starts at Kp 5- (4.67)
+        k = round(kp)
+        return f"🧲 Магнитная буря: до {k} баллов (G{min(5, k - 4)})"
+    if kp >= 4.0:
+        return "🧲 Геомагнитное поле возмущено: до 4 баллов"
+    return None
+
+
+def daylight_line():
+    city, (lat, lon) = next(iter(config.CITIES.items()))
+    r = requests.get(f"{config.URL_WEATHER}latitude={lat}&longitude={lon}"
+                     f"&daily=sunrise,sunset,daylight_duration&timezone=Europe%2FMoscow"
+                     f"&past_days=1&forecast_days=1", timeout=10)
+    r.raise_for_status()
+    d = r.json()["daily"]
+    i = d["time"].index(_moscow_now().strftime("%Y-%m-%d"))
+    dur = d["daylight_duration"][i]
+    hours, mins = divmod(round(dur / 60), 60)
+    line = f"🌅 Восход {d['sunrise'][i][11:16]}, закат {d['sunset'][i][11:16]}, день {hours} ч {mins:02d} мин"
+    if i > 0 and d["daylight_duration"][i - 1]:
+        diff = round((dur - d["daylight_duration"][i - 1]) / 60)
+        if diff > 0:
+            line += f" (прибавился на {diff} мин)"
+        elif diff < 0:
+            line += f" (убавился на {-diff} мин)"
+    return line
 
 
 def water_line():
@@ -162,6 +259,9 @@ def pick_photo_topic():
     key = (now.month, now.day)
     if key in BIRTHDAYS:
         return "birthday cake balloons"
+    movable = movable_holiday(now.date())   # Easter outranks a fixed date (e.g. 12 April 2026)
+    if movable:
+        return movable[1]
     if key in HOLIDAY_PHOTOS:
         return HOLIDAY_PHOTOS[key]
     season = {12: "winter", 1: "winter", 2: "winter", 3: "spring", 4: "spring", 5: "spring",
@@ -184,33 +284,26 @@ def pick_photo_topic():
     return f"{season} landscape"
 
 
+def _safe(fn):
+    """Runs one block; a failing source drops its line, never the post."""
+    try:
+        return fn()
+    except Exception as e:
+        print(f"[extras] {fn.__name__}: {type(e).__name__}: {e}")
+        return None
+
+
 def build_extras():
     """Returns (top_lines, extra_lines)."""
-    top, extra = [], []
-    for fn, bucket in ((date_line, top),):
-        try:
-            bucket.append(fn())
-        except Exception as e:
-            print(f"[extras] {fn.__name__}: {e}")
-    try:
-        top += birthday_lines()
-    except Exception as e:
-        print(f"[extras] birthdays: {e}")
-    try:
-        extra += weather_extras()
-    except Exception as e:
-        print(f"[extras] weather_extras: {e}")
-    try:
-        w = water_line()
-        if w:
-            extra.append(w)
-    except Exception as e:
-        print(f"[extras] water: {e}")
-    try:
-        extra.append(fx_line())
-    except Exception as e:
-        print(f"[extras] fx: {e}")
-    return top, extra
+    top = [_safe(date_line), _safe(day_type_line)] + (_safe(birthday_lines) or [])
+    extra = (_safe(weather_extras) or []) + [
+        _safe(kp_line),
+        f"🌙 {moon_phase().capitalize()}",
+        _safe(daylight_line),
+        _safe(water_line),
+        _safe(fx_line),
+    ]
+    return [x for x in top if x], [x for x in extra if x]
 
 
 if __name__ == "__main__":
