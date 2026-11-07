@@ -1,8 +1,11 @@
 """Extra lines for the morning post: date, holidays (fixed and Easter-based), day off or working day,
-birthdays, ice warning, rain, evening temp, pressure, magnetic storms, moon, daylight, water, FX.
+New Year countdown, birthdays, name days, ice warning, rain, evening temp, Friday weekend outlook,
+pressure, fishing score, magnetic storms, moon, dacha tip, daylight, UV, pollen, water, FX.
 
 Every block is independent: if one fails it is skipped, the post is still sent.
 """
+import json
+import os
 from datetime import date, datetime, timedelta
 
 import requests
@@ -103,6 +106,34 @@ def birthday_lines(days_ahead=3):
     return out
 
 
+def plural(n, forms):
+    """Russian plural: plural(5, ("день", "дня", "дней")) -> "дней"."""
+    n = abs(n) % 100
+    if 11 <= n <= 14:
+        return forms[2]
+    return forms[0] if n % 10 == 1 else forms[1] if 2 <= n % 10 <= 4 else forms[2]
+
+
+def new_year_line():
+    d = _moscow_now().date()
+    if d.month != 12 or d.day == 31:
+        return None
+    left = (date(d.year + 1, 1, 1) - d).days
+    return f"🎄 До Нового года {left} {plural(left, ('день', 'дня', 'дней'))}"
+
+
+def _load_namedays():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "namedays.json")
+    with open(path, encoding="utf-8") as f:
+        return {k: v for k, v in json.load(f).items() if not k.startswith("_")}
+
+
+def nameday_line():
+    d = _moscow_now()
+    names = _load_namedays().get(f"{d.day:02d}.{d.month:02d}")
+    return f"😇 Именины: {', '.join(names)}" if names else None
+
+
 def moon_phase():
     # Simple synodic-month approximation (reference new moon: 2000-01-06 18:14 UTC)
     days = (datetime.utcnow() - datetime(2000, 1, 6, 18, 14)).total_seconds() / 86400
@@ -118,7 +149,7 @@ def weather_extras():
     """Rain chance, evening temperature, pressure + trend for the first city."""
     city, (lat, lon) = next(iter(config.CITIES.items()))
     url = (f"{config.URL_WEATHER}latitude={lat}&longitude={lon}"
-           f"&hourly=temperature_2m,precipitation_probability,precipitation,surface_pressure,weathercode"
+           f"&hourly=temperature_2m,precipitation_probability,precipitation,surface_pressure,weathercode,windspeed_10m"
            f"&timezone=Europe%2FMoscow&past_days=1&forecast_days=1")
     r = requests.get(url, timeout=10)
     r.raise_for_status()
@@ -150,21 +181,77 @@ def weather_extras():
     if ev is not None:
         lines.append(f"🌆 Вечером в 18:00: {round(ev)}°C")
 
+    # Weekend outlook, Fridays only
+    if _moscow_now().weekday() == 4:
+        w = _safe(weekend_line)
+        if w:
+            lines.append(w)
+
     # Pressure + trend (hPa -> mmHg)
     mm = lambda v: round(v * 0.750062)
     morning = next((ps for t, _, _, _, ps in rows if t.endswith("06:00")), None)
     evening = next((ps for t, _, _, _, ps in rows if t.endswith("18:00")), None)
+    dp_day = dp_24h = None
     if morning is not None:
         trend = ""
         if evening is not None:
-            diff = mm(evening) - mm(morning)
-            trend = " (к вечеру растёт ↑)" if diff >= 2 else " (к вечеру падает ↓)" if diff <= -2 else " (стабильное)"
+            dp_day = mm(evening) - mm(morning)
+            trend = " (к вечеру растёт ↑)" if dp_day >= 2 else " (к вечеру падает ↓)" if dp_day <= -2 else " (стабильное)"
         vs = ""
         if y_morning is not None:
-            d = mm(morning) - mm(y_morning)
-            vs = f", {'+' if d > 0 else ''}{d} к вчера" if d else ", как вчера"
-        lines.append(f"🎣 Давление {mm(morning)} мм рт. ст.{vs}{trend}")
+            dp_24h = mm(morning) - mm(y_morning)
+            vs = f", {'+' if dp_24h > 0 else ''}{dp_24h} к вчера" if dp_24h else ", как вчера"
+        lines.append(f"⏲ Давление {mm(morning)} мм рт. ст.{vs}{trend}")
+
+    # Fishing score from pressure stability, daytime wind and the moon
+    winds = [w for t, w in zip(h["time"], h["windspeed_10m"])
+             if t.startswith(today) and "06:00" <= t[11:16] <= "20:00" and w is not None]
+    if dp_day is not None or dp_24h is not None:
+        label, why = fishing_score(dp_day, dp_24h, sum(winds) / len(winds) if winds else None, moon_phase())
+        lines.append(f"🎣 Клёв: {label}" + (f" ({', '.join(why)})" if why else ""))
     return lines
+
+
+def fishing_score(dp_day, dp_24h, wind_kmh, moon):
+    """Folk rule of thumb: steady pressure and light wind are good, jumps and strong wind are bad."""
+    score, why = 0, []
+    changes = [abs(x) for x in (dp_day, dp_24h) if x is not None]
+    if changes and max(changes) <= 2:
+        score += 2
+        why.append("давление стабильное")
+    elif changes and max(changes) >= 5:
+        score -= 2
+        why.append("давление скачет")
+    if wind_kmh is not None:
+        if wind_kmh <= 12:
+            score += 1
+            why.append("слабый ветер")
+        elif wind_kmh >= 30:
+            score -= 1
+            why.append("сильный ветер")
+    if moon in ("новолуние", "полнолуние"):
+        score -= 1
+        why.append(moon)
+    label = "хороший" if score >= 2 else "средний" if score >= 0 else "плохой"
+    return label, why
+
+
+def weekend_line():
+    city, (lat, lon) = next(iter(config.CITIES.items()))
+    r = requests.get(f"{config.URL_WEATHER}latitude={lat}&longitude={lon}"
+                     f"&daily=temperature_2m_max,temperature_2m_min,weathercode,precipitation_probability_max"
+                     f"&timezone=Europe%2FMoscow&forecast_days=3", timeout=10)
+    r.raise_for_status()
+    d = r.json()["daily"]
+    parts = []
+    for i, name in ((1, "сб"), (2, "вс")):
+        desc = config.WEATHER_CODES.get(d["weathercode"][i], "переменная погода")
+        rain = d["precipitation_probability_max"][i]
+        part = f"{name} {round(d['temperature_2m_min'][i])}…{round(d['temperature_2m_max'][i])}°C, {desc}"
+        if rain is not None and rain >= 40:
+            part += f" ({rain}%)"
+        parts.append(part)
+    return "📅 Выходные: " + "; ".join(parts)
 
 
 def ice_risk(night, codes_today):
@@ -214,6 +301,55 @@ def daylight_line():
         elif diff < 0:
             line += f" (убавился на {-diff} мин)"
     return line
+
+
+def dacha_line():
+    """Gardening tip by the moon, dacha season (April-September) only."""
+    if not 4 <= _moscow_now().month <= 9:
+        return None
+    moon = moon_phase()
+    if moon in ("новолуние", "полнолуние"):
+        return f"🌱 Дача: {moon} — посадки лучше отложить, хороший день для прополки"
+    if moon in ("растущая луна", "первая четверть"):
+        return "🌱 Дача: луна растёт — время сеять и сажать то, что растёт над землёй"
+    return "🌱 Дача: луна убывает — время для корнеплодов, обрезки и прополки"
+
+
+def uv_line():
+    city, (lat, lon) = next(iter(config.CITIES.items()))
+    r = requests.get(f"{config.URL_WEATHER}latitude={lat}&longitude={lon}"
+                     f"&daily=uv_index_max&timezone=Europe%2FMoscow&forecast_days=1", timeout=10)
+    r.raise_for_status()
+    uv = r.json()["daily"]["uv_index_max"][0]
+    if uv is None or uv < 3:
+        return None
+    level = ("умеренный — кепка и крем от солнца" if uv < 6 else
+             "высокий — крем SPF 30+, днём лучше в тени" if uv < 8 else
+             "очень высокий — с 12 до 16 лучше не быть на солнце")
+    return f"☀️ УФ-индекс {round(uv)}: {level}"
+
+
+# grains/m³ thresholds (moderate, high) per plant
+POLLEN = {"alder_pollen": ("ольха", 10, 100), "birch_pollen": ("берёза", 10, 100),
+          "grass_pollen": ("злаки", 5, 50), "mugwort_pollen": ("полынь", 5, 50)}
+
+
+def pollen_line():
+    city, (lat, lon) = next(iter(config.CITIES.items()))
+    r = requests.get("https://air-quality-api.open-meteo.com/v1/air-quality"
+                     f"?latitude={lat}&longitude={lon}&hourly={','.join(POLLEN)}"
+                     f"&timezone=Europe%2FMoscow&forecast_days=1", timeout=15)
+    r.raise_for_status()
+    h = r.json()["hourly"]
+    parts = []
+    for key, (name, moderate, high) in POLLEN.items():
+        vals = [v for v in h.get(key, []) if v is not None]
+        peak = max(vals) if vals else 0
+        if peak >= high:
+            parts.append(f"{name} — высокий уровень")
+        elif peak >= moderate:
+            parts.append(f"{name} — средний")
+    return "🌼 Пыльца: " + ", ".join(parts) if parts else None
 
 
 def water_line():
@@ -295,11 +431,15 @@ def _safe(fn):
 
 def build_extras():
     """Returns (top_lines, extra_lines)."""
-    top = [_safe(date_line), _safe(day_type_line)] + (_safe(birthday_lines) or [])
+    top = ([_safe(date_line), _safe(day_type_line), _safe(new_year_line)]
+           + (_safe(birthday_lines) or []) + [_safe(nameday_line)])
     extra = (_safe(weather_extras) or []) + [
         _safe(kp_line),
         f"🌙 {moon_phase().capitalize()}",
+        _safe(dacha_line),
         _safe(daylight_line),
+        _safe(uv_line),
+        _safe(pollen_line),
         _safe(water_line),
         _safe(fx_line),
     ]

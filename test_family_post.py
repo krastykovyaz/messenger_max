@@ -105,6 +105,7 @@ class RunOnce(Base):
         open(img, "w").close()
         pw = mock.MagicMock()
         with mock.patch.object(f, "build_message_with_ai", return_value="msg"), \
+                mock.patch.object(f, "purge_old_images"), \
                 mock.patch.object(f, "pick_photo_topic", return_value="t"), \
                 mock.patch.object(f, "download_random_image", return_value=img), \
                 mock.patch.object(f, "sync_playwright", return_value=pw), \
@@ -218,6 +219,86 @@ class DayType(unittest.TestCase):
     def test_ordinary_days_have_no_line(self):
         self.assertIsNone(self.line("0", date(2026, 11, 9)))   # Monday
         self.assertIsNone(self.line("1", date(2026, 11, 8)))   # Sunday
+
+
+def fake_get(payload):
+    return mock.patch.object(extras.requests, "get", return_value=mock.Mock(
+        json=mock.Mock(return_value=payload), raise_for_status=mock.Mock()))
+
+
+def on(day):
+    return mock.patch.object(extras, "_moscow_now", return_value=datetime.combine(day, datetime.min.time()))
+
+
+class Seasonal(unittest.TestCase):
+    def test_plural(self):
+        self.assertEqual([extras.plural(n, ("день", "дня", "дней")) for n in (1, 2, 5, 11, 21, 24)],
+                         ["день", "дня", "дней", "дней", "день", "дня"])
+
+    def test_new_year_countdown_only_in_december(self):
+        with on(date(2026, 12, 19)):
+            self.assertEqual(extras.new_year_line(), "🎄 До Нового года 13 дней")
+        with on(date(2026, 12, 30)):
+            self.assertEqual(extras.new_year_line(), "🎄 До Нового года 2 дня")
+        with on(date(2026, 12, 31)):
+            self.assertIsNone(extras.new_year_line())    # the date line already says it
+        with on(date(2026, 11, 30)):
+            self.assertIsNone(extras.new_year_line())
+
+    def test_name_days_from_file(self):
+        with on(date(2026, 1, 25)):
+            self.assertEqual(extras.nameday_line(), "😇 Именины: Татьяна")
+        with on(date(2026, 1, 26)):
+            self.assertIsNone(extras.nameday_line())
+
+    def test_dacha_tip_only_in_season(self):
+        with on(date(2026, 6, 1)), mock.patch.object(extras, "moon_phase", return_value="растущая луна"):
+            self.assertIn("сеять", extras.dacha_line())
+        with on(date(2026, 11, 1)):
+            self.assertIsNone(extras.dacha_line())
+
+    def test_uv_line_threshold(self):
+        with fake_get({"daily": {"uv_index_max": [2.4]}}):
+            self.assertIsNone(extras.uv_line())
+        with fake_get({"daily": {"uv_index_max": [6.2]}}):
+            self.assertIn("УФ-индекс 6: высокий", extras.uv_line())
+
+    def test_pollen_levels(self):
+        hourly = {"alder_pollen": [0.2], "birch_pollen": [2753.5], "grass_pollen": [6.0], "mugwort_pollen": [None]}
+        with fake_get({"hourly": hourly}):
+            self.assertEqual(extras.pollen_line(), "🌼 Пыльца: берёза — высокий уровень, злаки — средний")
+        with fake_get({"hourly": {k: [0.0] for k in hourly}}):
+            self.assertIsNone(extras.pollen_line())
+
+    def test_weekend_line(self):
+        daily = {"temperature_2m_max": [5, 4.6, 1.2], "temperature_2m_min": [1, 1.6, -2.4],
+                 "weathercode": [3, 3, 73], "precipitation_probability_max": [0, 10, 70]}
+        with fake_get({"daily": daily}):
+            self.assertEqual(extras.weekend_line(), "📅 Выходные: сб 2…5°C, пасмурно; вс -2…1°C, снег (70%)")
+
+
+class Fishing(unittest.TestCase):
+    def test_good(self):
+        self.assertEqual(extras.fishing_score(1, -2, 8, "убывающая луна"),
+                         ("хороший", ["давление стабильное", "слабый ветер"]))
+
+    def test_bad(self):
+        self.assertEqual(extras.fishing_score(-6, -3, 35, "полнолуние")[0], "плохой")
+
+    def test_middle(self):
+        self.assertEqual(extras.fishing_score(3, 1, 20, "растущая луна"), ("средний", []))
+
+
+class Images(unittest.TestCase):
+    def test_purge_keeps_fresh_files(self):
+        import download_pics
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(download_pics, "SAVE_DIR", d):
+            old, fresh = os.path.join(d, "old.jpg"), os.path.join(d, "new.jpg")
+            open(old, "w").close()
+            open(fresh, "w").close()
+            os.utime(old, (0, 0))
+            self.assertEqual(download_pics.purge_old_images(), 1)
+            self.assertEqual(os.listdir(d), ["new.jpg"])
 
 
 class Ai(unittest.TestCase):
