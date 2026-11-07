@@ -28,6 +28,9 @@ class Base(unittest.TestCase):
         self.alert = self.p_alert.start()
         self.p_hb = mock.patch.object(f, "heartbeat")
         self.hb = self.p_hb.start()
+        # never reach a real standby from a test, whatever the local .env says
+        mock.patch.object(f, "STANDBY_HOST", None).start()
+        mock.patch.object(f, "ROLE", "primary").start()
 
     def tearDown(self):
         mock.patch.stopall()
@@ -156,6 +159,7 @@ class PrimaryNotify(Base):
         self.assertIn("echo 2026-11-07 > family_post/state/primary_done", cmds[0][-1])
         self.assertEqual(cmds[1][0], "rsync")
         self.assertIn("--exclude=*Cache*", cmds[1])
+        self.assertIn("StrictHostKeyChecking=accept-new", cmds[0])
         self.alert.assert_not_called()
 
     def test_unconfirmed_send_leaves_no_marker(self):

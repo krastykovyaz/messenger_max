@@ -326,7 +326,8 @@ def primary_posted_today():
 
 
 def _ssh_cmd():
-    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
+    # accept-new: the first contact records the standby's host key; a changed key is still refused
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "StrictHostKeyChecking=accept-new"]
     if STANDBY_SSH_KEY:
         cmd += ["-i", STANDBY_SSH_KEY, "-o", "IdentitiesOnly=yes"]
     return cmd
