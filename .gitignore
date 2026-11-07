@@ -6,3 +6,8 @@ max_profile
 *.png
 DS_Store
 .env
+birthdays.json
+logs/
+state/
+*.bak-*
+*.before-recycle

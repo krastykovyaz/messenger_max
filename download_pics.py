@@ -4,7 +4,7 @@ import requests
 import config
 
 UNSPLASH_KEY = config.UNSPLASH_KEY
-SAVE_DIR = "images"
+SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
 
 TOPICS = [
     # Рыбалка
@@ -17,9 +17,15 @@ TOPICS = [
     "nature", "landscape", "mountains", "forest", "river", "lake", "sunrise", "sunset"
 ]
 
-def download_random_image():
-    # выбираем случайную тему
-    topic = random.choice(TOPICS)
+def download_random_image(topic=None):
+    try:
+        return _download(topic or random.choice(TOPICS))
+    except Exception as e:
+        print(f"⚠ Тема '{topic}' не сработала ({e}), беру случайную")
+        return _download(random.choice(TOPICS))
+
+
+def _download(topic):
     print(f"Выбрана тема: {topic}")
 
     # запрос к Unsplash
@@ -30,7 +36,7 @@ def download_random_image():
     }
     headers = {"Authorization": f"Client-ID {UNSPLASH_KEY}"}
 
-    r = requests.get(url, params=params, headers=headers)
+    r = requests.get(url, params=params, headers=headers, timeout=20)
     r.raise_for_status()
     data = r.json()
 
@@ -44,7 +50,7 @@ def download_random_image():
     filename = os.path.join(SAVE_DIR, f"{topic.replace(' ', '_')}_{data['id']}.jpg")
 
     # скачиваем картинку
-    img = requests.get(img_url)
+    img = requests.get(img_url, timeout=60)
     img.raise_for_status()
 
     with open(filename, "wb") as f:

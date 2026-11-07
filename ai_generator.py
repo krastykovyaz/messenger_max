@@ -1,4 +1,3 @@
-from typing import Optional
 import requests
 import config
 
@@ -14,7 +13,7 @@ class AIDescriptionGeneratorQwenVL:
 
     def _ollama_raw_request(self, payload: dict) -> str:
         try:
-            r = requests.post(self.ollama_url, json=payload, timeout=300)
+            r = requests.post(self.ollama_url, json=payload, timeout=90)
             r.raise_for_status()
             return r.json().get("response", "")
         except Exception as e:
@@ -30,39 +29,37 @@ class AIDescriptionGeneratorQwenVL:
         return self._ollama_raw_request(payload)
 
     def generate_viral_description(self, original_text: str) -> str:
-        prompt = self._build_prompt(original_text)
-
+        """A short warm greeting from the model, followed by the data exactly as given.
+        The model never rewrites the data lines, so none of them can be dropped or changed."""
+        greeting = ""
         try:
-            response = self._ollama_generate(prompt)
-            if not response:
-                return self._fallback(original_text)
-            return response.strip()
+            greeting = self._ollama_generate(self._build_prompt(original_text)).strip()
         except Exception as e:
             print(f"[AI ERROR] Ошибка генерации: {e}")
+        if not greeting or len(greeting) > 400:
             return self._fallback(original_text)
+        return f"{greeting}\n\n{original_text}"
 
     def _fallback(self, original_text: str) -> str:
         return f"Доброе утро! {original_text}"
 
     def _build_prompt(self, original_text: str) -> str:
         return f"""
-Сформируй доброе, тёплое и заботливое утреннее сообщение для родителей на основе данных ниже.
+Напиши короткое тёплое утреннее приветствие для семейного чата (родители, бабушка).
+Ниже сводка на сегодня — она будет отправлена целиком сразу после твоего текста,
+поэтому НЕ повторяй из неё цифры и данные, а только откликнись на настроение дня
+(погода, праздник или день рождения, если есть).
 
-Обязательно включи исходные данные в финальный текст в сжатом виде, без искажений:
+Сводка:
 {original_text}
 
 ТРЕБОВАНИЯ:
-- Стиль: спокойный, дружелюбный, поддерживающий, как от внимательного родителя
-- Длина: 3–5 предложений
-- Эмодзи: 1–3, уместные, без перебора
-- Не использовать HTML, хештеги, ссылки, капс
-- Не использовать призывы к действию
-- Не использовать рекламный стиль
-- Передай атмосферу спокойного начала дня
-- Добавь мягкое пожелание хорошего дня
-- Пиши естественно, как человек
+- 1–2 предложения, не больше 300 символов
+- 1–2 уместных эмодзи
+- Спокойный, заботливый тон, как от близкого человека
+- Без HTML, хештегов, ссылок, капса и рекламного стиля
 
-Верни только финальный текст.
+Верни только текст приветствия.
 """.strip()
 
 
