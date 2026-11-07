@@ -1,5 +1,6 @@
 import os
 import random
+import time
 import requests
 import config
 
@@ -16,6 +17,20 @@ TOPICS = [
     # Природа
     "nature", "landscape", "mountains", "forest", "river", "lake", "sunrise", "sunset"
 ]
+
+def purge_old_images(max_age_days=2):
+    """Pictures are deleted after each post; this sweeps up any left behind by a crash."""
+    if not os.path.isdir(SAVE_DIR):
+        return 0
+    cutoff = time.time() - max_age_days * 86400
+    removed = 0
+    for name in os.listdir(SAVE_DIR):
+        path = os.path.join(SAVE_DIR, name)
+        if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+            os.remove(path)
+            removed += 1
+    return removed
+
 
 def download_random_image(topic=None):
     try:

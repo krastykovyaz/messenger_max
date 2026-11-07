@@ -17,7 +17,7 @@ from playwright.sync_api import sync_playwright
 import config
 from ai_generator import AIDescriptionGeneratorQwenVL
 from alerts import alert, heartbeat
-from download_pics import download_random_image
+from download_pics import download_random_image, purge_old_images
 from extras import build_extras, pick_photo_topic
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -202,18 +202,8 @@ def get_weather_summary():
     return lines, clothes
 
 
-def get_spb_traffic():
-    try:
-        data = requests.get(config.URL_TRAFFIC, timeout=10).json()
-        score = data["data"]["score"]
-        return f"Пробки в Санкт‑Петербурге: {score}/10"
-    except Exception:
-        return None
-
-
 def build_message_with_ai():
     weather_lines, clothes = get_weather_summary()
-    traffic = get_spb_traffic()
     top_lines, extra_lines = build_extras()
     parts = []
     if top_lines:
@@ -221,8 +211,6 @@ def build_message_with_ai():
     parts.append("Погода на сегодня:\n" + "\n".join(weather_lines))
     if extra_lines:
         parts.append("\n".join(extra_lines))
-    if traffic:
-        parts.append(traffic)
     parts.append(f"Рекомендация по одежде: {clothes}")
     raw_text = "\n\n".join(parts)
     log("Текст поста:\n" + raw_text)
@@ -239,6 +227,7 @@ def open_chat(page):
 
 def run_once():
     """Builds and sends one post. Returns 'photo' or 'text' (the photo path failed)."""
+    purge_old_images()
     msg = build_message_with_ai()
     image_path = None
     try:

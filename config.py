@@ -11,7 +11,6 @@ CHAT_URL_ME = os.getenv("CHAT_URL_ME")
 CHAT_URL_KEK = os.getenv("CHAT_URL_KEK")
 
 URL_WEATHER="https://api.open-meteo.com/v1/forecast?"
-URL_TRAFFIC="https://yandex.ru/maps/api/traffic/jams"
 
 CITIES = {
     "Санкт‑Петербург": (59.9386, 30.3141),
