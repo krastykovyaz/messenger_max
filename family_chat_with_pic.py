@@ -45,6 +45,9 @@ PRIMARY_MARKER = os.path.join(STATE_DIR, "primary_done")   # written by the prim
 STANDBY_HOST = os.getenv("STANDBY_HOST")
 STANDBY_DIR = os.getenv("STANDBY_DIR", "family_post")
 STANDBY_SSH_KEY = os.getenv("STANDBY_SSH_KEY")
+# With a standby configured, the primary starts no attempt this many minutes after its post time,
+# so it can never be posting at the same moment as the standby (06:40).
+PRIMARY_LAST_START_MINUTES = 30
 CATCH_UP_MINUTES = 30      # started late (restart, reboot)? still post inside this window
 ATTEMPTS = 3               # tries per morning, only for failures before Enter was pressed
 RETRY_PAUSE = 300
@@ -244,7 +247,10 @@ def already_posted_today(page):
     """Today's post always carries the date line from extras.date_line()."""
     now = moscow_now()
     time.sleep(5)  # let the latest messages render
-    return page.get_by_text(f"Сегодня {now.day} {MONTHS[now.month - 1]}", exact=False).count() > 0
+    text = f"Сегодня {now.day} {MONTHS[now.month - 1]}"
+    in_chat = page.get_by_text(text, exact=False).count()
+    in_composer = page.locator(TEXTBOX).get_by_text(text, exact=False).count()   # a synced draft is not a post
+    return in_chat - in_composer > 0
 
 
 def run_once():
@@ -350,13 +356,23 @@ def notify_standby():
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             if r.returncode != 0:
-                raise RuntimeError((r.stderr or r.stdout).strip()[:200] or f"код {r.returncode}")
+                # ssh prints "Warning: Permanently added ..." before the real error
+                lines = [l for l in (r.stderr or r.stdout).splitlines() if l.strip() and not l.startswith("Warning:")]
+                raise RuntimeError((lines[-1] if lines else f"код {r.returncode}")[:200])
             log(f"✓ Резерв: {name} обновлена" if name == "метка" else f"✓ Резерв: {name} скопирован")
         except Exception as e:
             log(f"⚠ Резерв: {name} — {short(e)}")
             alert(f"⚠️ Не удалось обновить резервный сервер ({name}): {short(e)}. "
                   "Завтра резерв проверит чат сам, двойного поста не будет.")
             return
+
+
+def past_primary_deadline():
+    if ROLE != "primary" or not STANDBY_HOST:
+        return False
+    now = moscow_now()
+    start = now.replace(hour=POST_HOUR, minute=POST_MINUTE, second=0, microsecond=0)
+    return now >= start + timedelta(minutes=PRIMARY_LAST_START_MINUTES)
 
 
 def post_today():
@@ -366,6 +382,11 @@ def post_today():
             log("Основной сервер отправил пост — резерв не нужен")
             return
         for attempt in range(1, ATTEMPTS + 1):
+            if past_primary_deadline():
+                log("Время основного сервера вышло — оставляю пост резервному")
+                alert(f"❌ aak-first не смог отправить пост до 06:{PRIMARY_LAST_START_MINUTES:02d}. "
+                      "Его отправит резервный сервер horek_fi в 06:40.")
+                return
             try:
                 result = run_once()
                 if result == "already":

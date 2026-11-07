@@ -172,6 +172,30 @@ class PrimaryNotify(Base):
             f.post_today()
         self.sp.run.assert_not_called()
 
+    def test_no_attempt_after_the_deadline_leaves_the_day_to_the_standby(self):
+        with self.now(at(6, 30)), mock.patch.object(f, "run_once") as run:
+            f.post_today()
+        run.assert_not_called()
+        self.sp.run.assert_not_called()                  # no marker: the standby must post
+        self.assertIn("резервный сервер horek_fi в 06:40", self.alert.call_args[0][0])
+
+    def test_retries_stop_at_the_deadline(self):
+        times = iter([at(6, 20), at(6, 20), at(6, 25), at(6, 25), at(6, 31), at(6, 31)])
+        with mock.patch.object(f, "moscow_now", side_effect=lambda: next(times, at(6, 31))), \
+                mock.patch.object(f, "run_once", side_effect=RuntimeError("down")) as run:
+            f.post_today()
+        self.assertEqual(run.call_count, 2)              # 06:20 and 06:25, not 06:31
+        self.sp.run.assert_not_called()
+
+    def test_ssh_warning_is_not_reported_as_the_error(self):
+        self.sp.run.return_value = mock.Mock(returncode=255, stdout="", stderr=(
+            "Warning: Permanently added '1.2.3.4' (ECDSA) to the list of known hosts.\n"
+            "familypost@1.2.3.4: Permission denied (publickey).\n"))
+        with self.now(at(6)), mock.patch.object(f, "run_once", return_value="photo"):
+            f.post_today()
+        self.assertIn("Permission denied", self.alert.call_args[0][0])
+        self.assertNotIn("Permanently added", self.alert.call_args[0][0])
+
     def test_unreachable_standby_alerts_but_post_counts(self):
         self.sp.run.return_value = mock.Mock(returncode=255, stdout="", stderr="Connection timed out")
         with self.now(at(6)), mock.patch.object(f, "run_once", return_value="photo"):
