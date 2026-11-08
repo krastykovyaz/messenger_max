@@ -13,7 +13,7 @@ class AIDescriptionGeneratorQwenVL:
 
     def _ollama_raw_request(self, payload: dict) -> str:
         try:
-            r = requests.post(self.ollama_url, json=payload, timeout=90)
+            r = requests.post(self.ollama_url, json=payload, timeout=150)  # a cold 12B model on aak-llm needs ~70 s
             r.raise_for_status()
             return r.json().get("response", "")
         except Exception as e:
