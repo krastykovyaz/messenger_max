@@ -28,6 +28,9 @@ class Base(unittest.TestCase):
         self.alert = self.p_alert.start()
         self.p_hb = mock.patch.object(f, "heartbeat")
         self.hb = self.p_hb.start()
+        # never reach a real standby from a test, whatever the local .env says
+        mock.patch.object(f, "STANDBY_HOST", None).start()
+        mock.patch.object(f, "ROLE", "primary").start()
 
     def tearDown(self):
         mock.patch.stopall()
@@ -95,6 +98,113 @@ class PostToday(Base):
         self.assertIn("boom", self.alert.call_args[0][0])
         with self.now(at(6, 20)):
             self.assertTrue(f.posted_today())   # no second round in the catch-up window
+
+
+class Standby(Base):
+    def setUp(self):
+        super().setUp()
+        mock.patch.object(f, "ROLE", "standby").start()
+        mock.patch.object(f, "POST_MINUTE", 40).start()
+        mock.patch.object(f, "PRIMARY_MARKER", os.path.join(self.tmp.name, "primary_done")).start()
+
+    def test_waits_until_six_forty(self):
+        with self.now(at(6, 10)):
+            self.assertEqual(f.seconds_until_post(), 30 * 60)
+
+    def test_marker_from_primary_skips_without_touching_max(self):
+        with open(f.PRIMARY_MARKER, "w") as fh:
+            fh.write("2026-11-07")
+        with self.now(at(6, 40)), mock.patch.object(f, "run_once") as run:
+            f.post_today()
+        run.assert_not_called()
+        self.alert.assert_not_called()
+        with self.now(at(6, 41)):
+            self.assertTrue(f.posted_today())
+
+    def test_yesterdays_marker_does_not_count(self):
+        with open(f.PRIMARY_MARKER, "w") as fh:
+            fh.write("2026-11-06")
+        with self.now(at(6, 40)), mock.patch.object(f, "run_once", return_value="photo") as run:
+            f.post_today()
+        run.assert_called_once()
+
+    def test_post_already_in_chat_is_not_sent_again(self):
+        with self.now(at(6, 40)), mock.patch.object(f, "run_once", return_value="already"):
+            f.post_today()
+        self.hb.assert_not_called()
+        self.assertIn("Повторно не отправляю", self.alert.call_args[0][0])
+
+    def test_standby_post_alerts_and_does_not_notify(self):
+        with self.now(at(6, 40)), mock.patch.object(f, "run_once", return_value="photo"), \
+                mock.patch.object(f, "subprocess") as sp:
+            f.post_today()
+        self.hb.assert_called_once()
+        self.assertIn("резервный сервер horek_fi", self.alert.call_args[0][0])
+        sp.run.assert_not_called()
+
+
+class PrimaryNotify(Base):
+    def setUp(self):
+        super().setUp()
+        mock.patch.object(f, "ROLE", "primary").start()
+        mock.patch.object(f, "STANDBY_HOST", "familypost@standby").start()
+        self.sp = mock.patch.object(f, "subprocess").start()
+        self.sp.run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+
+    def test_confirmed_post_writes_marker_then_syncs_login(self):
+        with self.now(at(6)), mock.patch.object(f, "run_once", return_value="photo"):
+            f.post_today()
+        cmds = [c.args[0] for c in self.sp.run.call_args_list]
+        self.assertEqual(len(cmds), 2)
+        self.assertIn("echo 2026-11-07 > family_post/state/primary_done", cmds[0][-1])
+        self.assertEqual(cmds[1][0], "rsync")
+        self.assertIn("--exclude=*Cache*", cmds[1])
+        self.assertIn("StrictHostKeyChecking=accept-new", cmds[0])
+        self.alert.assert_not_called()
+
+    def test_unconfirmed_send_leaves_no_marker(self):
+        with self.now(at(6)), mock.patch.object(f, "run_once", side_effect=f.SendUnconfirmed("?")):
+            f.post_today()
+        self.sp.run.assert_not_called()
+
+    def test_total_failure_leaves_no_marker(self):
+        with self.now(at(6)), mock.patch.object(f, "run_once", side_effect=RuntimeError("down")):
+            f.post_today()
+        self.sp.run.assert_not_called()
+
+    def test_no_attempt_after_the_deadline_leaves_the_day_to_the_standby(self):
+        with self.now(at(6, 30)), mock.patch.object(f, "run_once") as run:
+            f.post_today()
+        run.assert_not_called()
+        self.sp.run.assert_not_called()                  # no marker: the standby must post
+        self.assertIn("резервный сервер horek_fi в 06:40", self.alert.call_args[0][0])
+
+    def test_retries_stop_at_the_deadline(self):
+        times = iter([at(6, 20), at(6, 20), at(6, 25), at(6, 25), at(6, 31), at(6, 31)])
+        with mock.patch.object(f, "moscow_now", side_effect=lambda: next(times, at(6, 31))), \
+                mock.patch.object(f, "run_once", side_effect=RuntimeError("down")) as run:
+            f.post_today()
+        self.assertEqual(run.call_count, 2)              # 06:20 and 06:25, not 06:31
+        self.sp.run.assert_not_called()
+
+    def test_ssh_warning_is_not_reported_as_the_error(self):
+        self.sp.run.return_value = mock.Mock(returncode=255, stdout="", stderr=(
+            "Warning: Permanently added '1.2.3.4' (ECDSA) to the list of known hosts.\n"
+            "familypost@1.2.3.4: Permission denied (publickey).\n"))
+        with self.now(at(6)), mock.patch.object(f, "run_once", return_value="photo"):
+            f.post_today()
+        self.assertIn("Permission denied", self.alert.call_args[0][0])
+        self.assertNotIn("Permanently added", self.alert.call_args[0][0])
+
+    def test_unreachable_standby_alerts_but_post_counts(self):
+        self.sp.run.return_value = mock.Mock(returncode=255, stdout="", stderr="Connection timed out")
+        with self.now(at(6)), mock.patch.object(f, "run_once", return_value="photo"):
+            f.post_today()
+        self.hb.assert_called_once()
+        self.assertEqual(self.sp.run.call_count, 1)     # gives up after the marker step
+        self.assertIn("резервный сервер", self.alert.call_args[0][0])
+        with self.now(at(6, 1)):
+            self.assertTrue(f.posted_today())
 
 
 class RunOnce(Base):

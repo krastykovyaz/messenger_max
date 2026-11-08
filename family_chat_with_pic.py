@@ -1,11 +1,19 @@
 """Daily family post to MAX at 06:00 Moscow time: weather, extras and a matching photo.
 
-Runs as a long-lived process (started and kept alive by cron, see README section in the PR).
+Runs as a long-lived process (started and kept alive by cron).
 Only one instance can run at a time, a day is never posted twice, and every failure is
 reported to Telegram through the server monitor's bot (alerts.py).
+
+Two roles (FAMILY_POST_ROLE):
+- primary (aak-first) posts at 06:00. After a confirmed post it writes a marker onto the
+  standby over SSH and copies the MAX login there, so the standby's copy stays valid.
+- standby (horek_fi) wakes at 06:40. With the marker present it does nothing and never
+  touches MAX. Without it, it opens the chat and posts only if today's post is not there.
 """
 import fcntl
 import os
+import shlex
+import subprocess
 import time
 import traceback
 from datetime import datetime, timedelta
@@ -18,7 +26,7 @@ import config
 from ai_generator import AIDescriptionGeneratorQwenVL
 from alerts import alert, heartbeat
 from download_pics import download_random_image, purge_old_images
-from extras import build_extras, pick_photo_topic
+from extras import MONTHS, build_extras, pick_photo_topic
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.join(BASE_DIR, "max_profile")
@@ -29,7 +37,17 @@ LAST_POST_FILE = os.path.join(STATE_DIR, "last_post_date")
 CHAT_URL = os.getenv("FAMILY_POST_CHAT_URL") or config.CHAT_URL_FAM
 
 MSK = ZoneInfo("Europe/Moscow")
+ROLE = os.getenv("FAMILY_POST_ROLE", "primary")
 POST_HOUR = 6
+POST_MINUTE = int(os.getenv("STANDBY_DELAY_MINUTES", "40")) if ROLE == "standby" else 0
+PRIMARY_MARKER = os.path.join(STATE_DIR, "primary_done")   # written by the primary over SSH
+# primary only: where the standby lives, e.g. familypost@2.27.33.175 (unset = no standby)
+STANDBY_HOST = os.getenv("STANDBY_HOST")
+STANDBY_DIR = os.getenv("STANDBY_DIR", "family_post")
+STANDBY_SSH_KEY = os.getenv("STANDBY_SSH_KEY")
+# With a standby configured, the primary starts no attempt this many minutes after its post time,
+# so it can never be posting at the same moment as the standby (06:40).
+PRIMARY_LAST_START_MINUTES = 30
 CATCH_UP_MINUTES = 30      # started late (restart, reboot)? still post inside this window
 ATTEMPTS = 3               # tries per morning, only for failures before Enter was pressed
 RETRY_PAUSE = 300
@@ -225,8 +243,19 @@ def open_chat(page):
         raise RuntimeError("поле ввода не появилось — возможно, слетел вход в MAX (max_profile)")
 
 
+def already_posted_today(page):
+    """Today's post always carries the date line from extras.date_line()."""
+    now = moscow_now()
+    time.sleep(5)  # let the latest messages render
+    text = f"Сегодня {now.day} {MONTHS[now.month - 1]}"
+    in_chat = page.get_by_text(text, exact=False).count()
+    in_composer = page.locator(TEXTBOX).get_by_text(text, exact=False).count()   # a synced draft is not a post
+    return in_chat - in_composer > 0
+
+
 def run_once():
-    """Builds and sends one post. Returns 'photo' or 'text' (the photo path failed)."""
+    """Builds and sends one post. Returns 'photo', 'text' (the photo path failed)
+    or, on the standby, 'already' when today's post is in the chat."""
     purge_old_images()
     msg = build_message_with_ai()
     image_path = None
@@ -243,6 +272,8 @@ def run_once():
             try:
                 page = browser.new_page()
                 open_chat(page)
+                if ROLE == "standby" and already_posted_today(page):
+                    return "already"
                 if image_path:
                     try:
                         send_message_with_pic(page, msg, image_path)
@@ -276,7 +307,7 @@ def mark_day_done():
 
 def seconds_until_post():
     now = moscow_now()
-    target = now.replace(hour=POST_HOUR, minute=0, second=0, microsecond=0)
+    target = now.replace(hour=POST_HOUR, minute=POST_MINUTE, second=0, microsecond=0)
     if posted_today() or now > target + timedelta(minutes=CATCH_UP_MINUTES):
         target += timedelta(days=1)
     elif now >= target:
@@ -292,19 +323,88 @@ def wait_for_post_time():
         time.sleep(min(wait, 300))
 
 
+def primary_posted_today():
+    try:
+        with open(PRIMARY_MARKER, encoding="utf-8") as f:
+            return f.read().strip() == moscow_now().date().isoformat()
+    except FileNotFoundError:
+        return False
+
+
+def _ssh_cmd():
+    # accept-new: the first contact records the standby's host key; a changed key is still refused
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "StrictHostKeyChecking=accept-new"]
+    if STANDBY_SSH_KEY:
+        cmd += ["-i", STANDBY_SSH_KEY, "-o", "IdentitiesOnly=yes"]
+    return cmd
+
+
+def notify_standby():
+    """Primary only, after a confirmed post: marker first (it is what stops the standby),
+    then the MAX login without caches. Never raises; a failure means the standby will check the chat."""
+    if ROLE != "primary" or not STANDBY_HOST:
+        return
+    today = moscow_now().date().isoformat()
+    steps = [
+        ("метка", _ssh_cmd() + [STANDBY_HOST,
+                                f"mkdir -p {STANDBY_DIR}/state && echo {today} > {STANDBY_DIR}/state/primary_done"], 60),
+        ("вход MAX", ["rsync", "-a", "--delete", "--exclude=*Cache*", "--exclude=*cache*",
+                      "--exclude=Singleton*", "-e", shlex.join(_ssh_cmd()),
+                      PROFILE_DIR + "/", f"{STANDBY_HOST}:{STANDBY_DIR}/max_profile/"], 600),
+    ]
+    for name, cmd, timeout in steps:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if r.returncode != 0:
+                # ssh prints "Warning: Permanently added ..." before the real error
+                lines = [l for l in (r.stderr or r.stdout).splitlines() if l.strip() and not l.startswith("Warning:")]
+                raise RuntimeError((lines[-1] if lines else f"код {r.returncode}")[:200])
+            log(f"✓ Резерв: {name} обновлена" if name == "метка" else f"✓ Резерв: {name} скопирован")
+        except Exception as e:
+            log(f"⚠ Резерв: {name} — {short(e)}")
+            alert(f"⚠️ Не удалось обновить резервный сервер ({name}): {short(e)}. "
+                  "Завтра резерв проверит чат сам, двойного поста не будет.")
+            return
+
+
+def past_primary_deadline():
+    if ROLE != "primary" or not STANDBY_HOST:
+        return False
+    now = moscow_now()
+    start = now.replace(hour=POST_HOUR, minute=POST_MINUTE, second=0, microsecond=0)
+    return now >= start + timedelta(minutes=PRIMARY_LAST_START_MINUTES)
+
+
 def post_today():
     """Up to ATTEMPTS tries; the day is marked done afterwards whatever happened, so it is never posted twice."""
     try:
+        if ROLE == "standby" and primary_posted_today():
+            log("Основной сервер отправил пост — резерв не нужен")
+            return
         for attempt in range(1, ATTEMPTS + 1):
+            if past_primary_deadline():
+                log("Время основного сервера вышло — оставляю пост резервному")
+                alert(f"❌ aak-first не смог отправить пост до 06:{PRIMARY_LAST_START_MINUTES:02d}. "
+                      "Его отправит резервный сервер horek_fi в 06:40.")
+                return
             try:
                 result = run_once()
+                if result == "already":
+                    log("Пост уже в чате — резерв не нужен")
+                    alert("ℹ️ Сегодняшний пост в чате есть, а метки от aak-first нет "
+                          "(сбой связи aak-first → horek_fi или неподтверждённая отправка). Повторно не отправляю.")
+                    return
                 heartbeat()
                 if result == "text":
                     alert("⚠️ Пост ушёл без картинки: прикрепить фото не получилось. Подробности в logs/family.log")
+                if ROLE == "standby":
+                    alert("⚠️ aak-first не отправил пост к 06:40 — его отправил резервный сервер horek_fi.")
                 log("=== Готово! ===")
+                notify_standby()
                 return
             except SendUnconfirmed as e:
-                alert(f"⚠️ Не уверен, что пост ушёл ({e}). Проверьте чат «Семья». Повторять не буду.")
+                # No marker: the standby will look at the chat and post only if this one did not go out.
+                alert(f"⚠️ Не уверен, что пост ушёл ({e}). Резервный сервер проверит чат в 06:40.")
                 return
             except Exception as e:
                 log(f"❌ Попытка {attempt}/{ATTEMPTS}: {short(e)}\n{traceback.format_exc()}")
@@ -326,7 +426,7 @@ def main_loop():
     except BlockingIOError:
         log("Уже работает другой экземпляр — выхожу")
         return
-    log(f"Запущен, PID {os.getpid()}")
+    log(f"Запущен ({ROLE}), PID {os.getpid()}")
     while True:
         try:
             wait_for_post_time()

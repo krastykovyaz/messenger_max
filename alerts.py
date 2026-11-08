@@ -4,10 +4,14 @@ Credentials are read from config.ALERT_ENV_FILE (TG_BOT_TOKEN, TG_CHAT_ID, HB_UR
 Nothing here ever raises: a broken alert channel must not break the post.
 """
 import os
+import socket
 import urllib.parse
 
 import requests
 import config
+
+
+HOST_LABEL = os.getenv("FAMILY_POST_HOST_LABEL") or socket.gethostname().split(".")[0]
 
 
 def _env():
@@ -34,7 +38,7 @@ def alert(text):
     try:
         r = requests.post(
             f"https://api.telegram.org/bot{env['TG_BOT_TOKEN']}/sendMessage",
-            data={"chat_id": env["TG_CHAT_ID"], "text": f"aak-first · семейный пост\n{text}"[:4000]},
+            data={"chat_id": env["TG_CHAT_ID"], "text": f"{HOST_LABEL} · семейный пост\n{text}"[:4000]},
             timeout=20,
         )
         r.raise_for_status()
