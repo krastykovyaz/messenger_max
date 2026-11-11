@@ -26,7 +26,7 @@ import config
 from ai_generator import AIDescriptionGeneratorQwenVL
 from alerts import alert, heartbeat
 from download_pics import download_random_image, purge_old_images
-from extras import MONTHS, build_extras, pick_photo_topic
+from extras import MONTHS, build_extras, clothing_line, pick_photo_topic
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.join(BASE_DIR, "max_profile")
@@ -220,6 +220,14 @@ def get_weather_summary():
     return lines, clothes
 
 
+def _safe_clothing():
+    try:
+        return clothing_line()
+    except Exception as e:
+        log(f"[extras] clothing_line: {short(e)}")
+        return None
+
+
 def build_message_with_ai():
     weather_lines, clothes = get_weather_summary()
     top_lines, extra_lines = build_extras()
@@ -229,7 +237,8 @@ def build_message_with_ai():
     parts.append("Погода на сегодня:\n" + "\n".join(weather_lines))
     if extra_lines:
         parts.append("\n".join(extra_lines))
-    parts.append(f"Рекомендация по одежде: {clothes}")
+    # feels-like advice; the simple average-temperature tip is the fallback
+    parts.append(_safe_clothing() or f"Рекомендация по одежде: {clothes}")
     raw_text = "\n\n".join(parts)
     log("Текст поста:\n" + raw_text)
     return AIDescriptionGeneratorQwenVL().generate_viral_description(original_text=raw_text)

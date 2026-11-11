@@ -411,6 +411,60 @@ class Images(unittest.TestCase):
             self.assertEqual(os.listdir(d), ["new.jpg"])
 
 
+class Clothing(unittest.TestCase):
+    def advice(self, feels, t_min=0, t_max=4, wind=10, rain=False, snow=False, ice=False, uv=None):
+        return extras.clothing_advice(feels, t_min, t_max, wind, rain, snow, ice, uv)
+
+    def test_bands_follow_feels_like(self):
+        self.assertIn("тёплая куртка, шапка, перчатки", self.advice(-1))
+        self.assertIn("демисезонная куртка", self.advice(3.4))
+        self.assertIn("лёгкая куртка или плотная толстовка", self.advice(9))
+        self.assertIn("зимняя куртка, шапка, перчатки, шарф", self.advice(-7))
+        self.assertIn("пуховик", self.advice(-25))
+        self.assertIn("лёгкая одежда", self.advice(27))
+
+    def test_feels_like_is_shown_with_a_real_minus(self):
+        self.assertTrue(self.advice(-1.4).startswith("Рекомендация по одежде (ощущается как −1°C): "))
+        self.assertIn("(ощущается как 3°C)", self.advice(3.4))
+
+    def test_add_ons(self):
+        line = self.advice(-1, t_min=-2, t_max=7, wind=40, rain=True, ice=True, uv=None)
+        for part in ("непромокаемая куртка и обувь, зонт", "нескользящей подошвой",
+                     "закрытая от ветра", "оденьтесь слоями"):
+            self.assertIn(part, line)
+
+    def test_snow_replaces_rain_advice(self):
+        line = self.advice(-4, rain=True, snow=True)
+        self.assertIn("зимняя обувь", line)
+        self.assertNotIn("зонт", line)
+
+    def test_summer_sun(self):
+        self.assertIn("кепка и солнцезащитные очки", self.advice(24, t_min=18, t_max=25, uv=7))
+
+    def test_clothing_line_from_forecast(self):
+        hours = [f"2026-11-11T{h:02d}:00" for h in range(24)]
+        payload = {"hourly": {
+            "time": ["2026-11-10T12:00"] + hours,
+            "temperature_2m": [4.0] + [2.0] * 24,
+            "apparent_temperature": [1.0] + [-1.2] * 24,
+            "precipitation": [0.0] + [0.0] * 24,
+            "snowfall": [0.0] + [0.0] * 24,
+            "precipitation_probability": [0] + [10] * 24,
+            "weathercode": [3] + [3] * 24,
+            "windspeed_10m": [10.0] + [12.0] * 24},
+            "daily": {"uv_index_max": [0.6]}}
+        with fake_get(payload), on(date(2026, 11, 11)):
+            self.assertEqual(extras.clothing_line(),
+                             "Рекомендация по одежде (ощущается как −1°C): тёплая куртка, шапка, перчатки")
+
+    def test_message_falls_back_to_the_old_tip(self):
+        with mock.patch.object(f, "get_weather_summary", return_value=(["СПб: 1…3°C"], "лёгкая куртка или толстовка")), \
+                mock.patch.object(f, "build_extras", return_value=([], [])), \
+                mock.patch.object(f, "clothing_line", side_effect=RuntimeError("503")), \
+                mock.patch.object(f.AIDescriptionGeneratorQwenVL, "generate_viral_description", side_effect=lambda original_text: original_text):
+            self.assertIn("Рекомендация по одежде: лёгкая куртка или толстовка", f.build_message_with_ai())
+
+
 class Ai(unittest.TestCase):
     def test_data_is_kept_verbatim_after_greeting(self):
         g = ai_generator.AIDescriptionGeneratorQwenVL()

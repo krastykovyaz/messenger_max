@@ -420,6 +420,74 @@ def pick_photo_topic():
     return f"{season} landscape"
 
 
+# (feels-like below this °C, advice); the first band that fits wins
+CLOTHING_BANDS = [
+    (-20, "пуховик, тёплая шапка, варежки, шарф, термобельё"),
+    (-10, "тёплая зимняя куртка, шапка, варежки, шарф"),
+    (-3, "зимняя куртка, шапка, перчатки, шарф"),
+    (3, "тёплая куртка, шапка, перчатки"),
+    (8, "демисезонная куртка, лёгкая шапка"),
+    (13, "лёгкая куртка или плотная толстовка"),
+    (18, "ветровка или худи"),
+    (23, "футболка, на вечер лёгкая кофта"),
+    (99, "лёгкая одежда, головной убор от солнца"),
+]
+
+
+def clothing_advice(feels_min, t_min, t_max, wind_max, rain, snow, ice, uv):
+    """Pure rule: base outfit from the coldest feels-like temperature of the day, plus add-ons."""
+    base = next(text for limit, text in CLOTHING_BANDS if feels_min < limit)
+    extras_ = []
+    if snow:
+        extras_.append("зимняя обувь")
+    elif rain:
+        extras_.append("непромокаемая куртка и обувь, зонт")
+    if ice:
+        extras_.append("обувь с нескользящей подошвой")
+    if wind_max is not None and wind_max >= 35:
+        extras_.append("капюшон или куртка, закрытая от ветра")
+    if t_max - t_min >= 8:
+        extras_.append("оденьтесь слоями: днём заметно теплее")
+    if uv is not None and uv >= 6:
+        extras_.append("кепка и солнцезащитные очки")
+    feels = round(feels_min)
+    sign = "−" if feels < 0 else ""
+    return (f"Рекомендация по одежде (ощущается как {sign}{abs(feels)}°C): "
+            + "; ".join([base] + extras_))
+
+
+def clothing_line():
+    """Daytime (07-20) data for the first city: feels-like, rain/snow, wind, ice, UV."""
+    city, (lat, lon) = next(iter(config.CITIES.items()))
+    r = requests.get(f"{config.URL_WEATHER}latitude={lat}&longitude={lon}"
+                     f"&hourly=temperature_2m,apparent_temperature,precipitation,snowfall,"
+                     f"precipitation_probability,weathercode,windspeed_10m"
+                     f"&daily=uv_index_max&timezone=Europe%2FMoscow&past_days=1&forecast_days=1", timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    h = data["hourly"]
+    today = _moscow_now().strftime("%Y-%m-%d")
+    yday = (_moscow_now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    rows = list(zip(h["time"], h["temperature_2m"], h["apparent_temperature"], h["precipitation"],
+                    h["snowfall"], h["precipitation_probability"], h["weathercode"], h["windspeed_10m"]))
+    day = [x for x in rows if x[0].startswith(today) and "07:00" <= x[0][11:16] <= "20:00"]
+    if not day:
+        return None
+    temps = [x[1] for x in day if x[1] is not None]
+    feels = [x[2] for x in day if x[2] is not None]
+    if not temps or not feels:
+        return None
+    snow_codes = (71, 73, 75, 77, 85, 86)
+    snow = sum(x[4] or 0 for x in day) >= 0.5 or any(x[6] in snow_codes for x in day)
+    rain = not snow and (sum(x[3] or 0 for x in day) >= 0.5 or any((x[5] or 0) >= 60 for x in day))
+    night = [(x[1], x[3]) for x in rows if f"{yday}T12:00" <= x[0] <= f"{today}T12:00"]
+    ice = ice_risk(night, [x[6] for x in rows if x[0].startswith(today)])
+    winds = [x[7] for x in day if x[7] is not None]
+    uv = (data.get("daily", {}).get("uv_index_max") or [None])[0]
+    return clothing_advice(min(feels), min(temps), max(temps), max(winds) if winds else None,
+                           rain, snow, ice, uv)
+
+
 def _safe(fn):
     """Runs one block; a failing source drops its line, never the post."""
     try:
