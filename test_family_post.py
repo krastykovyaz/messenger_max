@@ -465,6 +465,58 @@ class Clothing(unittest.TestCase):
             self.assertIn("Рекомендация по одежде: лёгкая куртка или толстовка", f.build_message_with_ai())
 
 
+SPB_QUARTERS = ("Школа", [
+    ("term", "1-я четверть", date(2026, 9, 1), date(2026, 10, 25)),
+    ("holiday", "осенние каникулы", date(2026, 10, 26), date(2026, 11, 3)),
+    ("term", "2-я четверть", date(2026, 11, 5), date(2026, 12, 30)),
+    ("holiday", "зимние каникулы", date(2026, 12, 31), date(2027, 1, 10)),
+    ("term", "3-я четверть", date(2027, 1, 11), date(2027, 3, 26)),
+    ("holiday", "весенние каникулы", date(2027, 3, 27), date(2027, 4, 4)),
+    ("term", "4-я четверть", date(2027, 4, 5), date(2027, 5, 26)),
+    ("holiday", "летние каникулы", date(2027, 5, 27), date(2027, 8, 31)),
+])
+
+
+class School(unittest.TestCase):
+    def line(self, y, m, d):
+        with mock.patch.object(extras, "_load_school", return_value=SPB_QUARTERS):
+            return extras.school_line(date(y, m, d))
+
+    def test_mid_quarter_with_countdown(self):
+        self.assertEqual(self.line(2026, 11, 13), "🏫 Школа: 2-я четверть, 2-я неделя · до зимних каникул 48 дней")
+
+    def test_last_week_is_assessment(self):
+        self.assertEqual(self.line(2026, 10, 19),
+                         "🏫 Школа: 1-я четверть, 8-я неделя · до осенних каникул 7 дней · последняя неделя — аттестация")
+
+    def test_last_school_day_is_friday_before_a_sunday_end(self):
+        self.assertEqual(self.line(2026, 10, 23), "🔔 Школа: последний учебный день — с завтрашнего дня осенние каникулы!")
+
+    def test_holidays(self):
+        self.assertEqual(self.line(2026, 10, 26), "🏖 Школа: начались осенние каникулы! В школу — 5 ноября")
+        self.assertEqual(self.line(2026, 10, 30), "🏖 Школа: осенние каникулы · в школу через 6 дней")
+        self.assertEqual(self.line(2026, 12, 31), "🏖 Школа: начались зимние каникулы! В школу — 11 января")
+
+    def test_back_to_school(self):
+        self.assertEqual(self.line(2026, 11, 4), "🔔 Школа: завтра снова в школу — начинается 2-я четверть")   # public holiday gap
+        self.assertEqual(self.line(2027, 1, 10), "🔔 Школа: завтра снова в школу — начинается 3-я четверть")
+        self.assertEqual(self.line(2027, 1, 11), "🔔 Школа: сегодня начинается 3-я четверть — хорошего начала!")
+
+    def test_end_of_year_and_summer(self):
+        self.assertEqual(self.line(2027, 5, 26), "🔔 Школа: последний учебный день — с завтрашнего дня летние каникулы!")
+        self.assertEqual(self.line(2027, 6, 15), "🏖 Школа: летние каникулы до 31 августа")
+        self.assertIsNone(self.line(2027, 9, 5))     # past the calendar
+
+    def test_no_file_no_line(self):
+        with mock.patch.object(extras, "_load_school", return_value=None):
+            self.assertIsNone(extras.school_line(date(2026, 11, 13)))
+
+    def test_renewal_reminder_two_weeks_before_the_end(self):
+        with mock.patch.object(extras, "_load_school", return_value=SPB_QUARTERS):
+            self.assertTrue(extras.school_calendar_expiring(date(2027, 8, 17)))
+            self.assertFalse(extras.school_calendar_expiring(date(2027, 8, 16)))
+
+
 class Ai(unittest.TestCase):
     def test_data_is_kept_verbatim_after_greeting(self):
         g = ai_generator.AIDescriptionGeneratorQwenVL()

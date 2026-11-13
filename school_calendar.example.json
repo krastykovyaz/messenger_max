@@ -1,0 +1,8 @@
+{
+  "_comment": "Copy to school_calendar.json (not in git). kind: term | holiday; dates are inclusive.",
+  "school": "Школа",
+  "periods": [
+    {"kind": "term",    "name": "1-я четверть",    "start": "2026-09-01", "end": "2026-10-25"},
+    {"kind": "holiday", "name": "осенние каникулы", "start": "2026-10-26", "end": "2026-11-03"}
+  ]
+}

@@ -12,3 +12,4 @@ state/
 *.bak-*
 *.before-recycle
 alert.env
+school_calendar.json

@@ -1,5 +1,5 @@
 """Extra lines for the morning post: date, holidays (fixed and Easter-based), day off or working day,
-New Year countdown, birthdays, name days, ice warning, rain, evening temp, Friday weekend outlook,
+school calendar (school_calendar.json), New Year countdown, birthdays, name days, ice warning, rain, evening temp, Friday weekend outlook,
 pressure, fishing score, magnetic storms, moon, dacha tip, daylight, UV, pollen, water, FX.
 
 Every block is independent: if one fails it is skipped, the post is still sent.
@@ -488,6 +488,89 @@ def clothing_line():
                            rain, snow, ice, uv)
 
 
+def _load_school():
+    """school_calendar.json (not in git: it names the school). None when the file is absent."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "school_calendar.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return None
+    periods = [(p["kind"], p["name"], date.fromisoformat(p["start"]), date.fromisoformat(p["end"]))
+               for p in data["periods"]]
+    return data.get("school", "Школа"), sorted(periods, key=lambda p: p[2])
+
+
+def _genitive_holiday(name):
+    # "осенние каникулы" -> "осенних каникул"
+    return name.replace("ие каникулы", "их каникул")
+
+
+def _last_weekday(start, end):
+    d = end
+    while d.weekday() >= 5 and d > start:
+        d -= timedelta(days=1)
+    return d
+
+
+def _date_words(d):
+    return f"{d.day} {MONTHS[d.month - 1]}"
+
+
+def school_line(today=None):
+    """One line about the school year: quarter and week, countdown to the holidays,
+    last school day, holidays, back to school."""
+    loaded = _load_school()
+    if not loaded:
+        return None
+    school, periods = loaded
+    d = today or _moscow_now().date()
+    cur = next((p for p in periods if p[2] <= d <= p[3]), None)
+    upcoming = [p for p in periods if p[2] > d]
+    next_term = next((p for p in upcoming if p[0] == "term"), None)
+    next_holiday = next((p for p in upcoming if p[0] == "holiday"), None)
+    days_word = lambda n: plural(n, ("день", "дня", "дней"))
+
+    if (cur is None or cur[0] != "term") and next_term and next_term[2] == d + timedelta(days=1):
+        return f"🔔 {school}: завтра снова в школу — начинается {next_term[1]}"
+    if cur is None:
+        return None
+    kind, name, start, end = cur
+    if kind == "term":
+        last_day = _last_weekday(start, end)
+        if d == start:
+            return f"🔔 {school}: сегодня начинается {name} — хорошего начала!"
+        if d == last_day:
+            if next_holiday:
+                return f"🔔 {school}: последний учебный день — с завтрашнего дня {next_holiday[1]}!"
+            return f"🔔 {school}: последний учебный день, {name} закончилась"
+        week = (d - (start - timedelta(days=start.weekday()))).days // 7 + 1
+        line = f"🏫 {school}: {name}, {week}-я неделя"
+        if next_holiday:
+            left = (next_holiday[2] - d).days
+            line += f" · до {_genitive_holiday(next_holiday[1])} {left} {days_word(left)}"
+        if d.weekday() < 5 and d >= last_day - timedelta(days=last_day.weekday()):
+            line += " · последняя неделя — аттестация"
+        return line
+    # holidays
+    if d == start:
+        back = f" В школу — {_date_words(next_term[2])}" if next_term else ""
+        return f"🏖 {school}: начались {name}!{back}"
+    if next_term:
+        left = (next_term[2] - d).days
+        return f"🏖 {school}: {name} · в школу через {left} {days_word(left)}"
+    return f"🏖 {school}: {name} до {_date_words(end)}"
+
+
+def school_calendar_expiring(today=None):
+    """True exactly 14 days before the last date in school_calendar.json: time to add next year."""
+    loaded = _load_school()
+    if not loaded:
+        return False
+    d = today or _moscow_now().date()
+    return d == max(p[3] for p in loaded[1]) - timedelta(days=14)
+
+
 def _safe(fn):
     """Runs one block; a failing source drops its line, never the post."""
     try:
@@ -499,7 +582,7 @@ def _safe(fn):
 
 def build_extras():
     """Returns (top_lines, extra_lines)."""
-    top = ([_safe(date_line), _safe(day_type_line), _safe(new_year_line)]
+    top = ([_safe(date_line), _safe(day_type_line), _safe(school_line), _safe(new_year_line)]
            + (_safe(birthday_lines) or []) + [_safe(nameday_line)])
     extra = (_safe(weather_extras) or []) + [
         _safe(kp_line),
