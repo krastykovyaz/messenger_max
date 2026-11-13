@@ -5,7 +5,7 @@ Run: venv/bin/python -m unittest test_family_post -v
 import os
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from unittest import mock
 
 import family_chat_with_pic as f
@@ -515,6 +515,79 @@ class School(unittest.TestCase):
         with mock.patch.object(extras, "_load_school", return_value=SPB_QUARTERS):
             self.assertTrue(extras.school_calendar_expiring(date(2027, 8, 17)))
             self.assertFalse(extras.school_calendar_expiring(date(2027, 8, 16)))
+
+
+def rss(*items):
+    """items: (title, hours_ago, categories)"""
+    from email.utils import format_datetime
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
+    body = "".join(
+        f"<item><title>{t}</title><pubDate>{format_datetime(now - timedelta(hours=h))}</pubDate>"
+        + "".join(f"<category>{c}</category>" for c in cats) + "</item>"
+        for t, h, cats in items)
+    return mock.Mock(content=f"<rss><channel>{body}</channel></rss>".encode(), raise_for_status=mock.Mock())
+
+
+class News(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        mock.patch.object(extras, "NEWS_SEEN_FILE", os.path.join(self.tmp.name, "news_seen.json")).start()
+        del extras._pending_news[:]
+
+    def tearDown(self):
+        mock.patch.stopall()
+        del extras._pending_news[:]
+        self.tmp.cleanup()
+
+    def feed(self, *items):
+        return mock.patch.object(extras.requests, "get", return_value=rss(*items))
+
+    def test_school_relevant_headline_beats_university_news(self):
+        with self.feed(("Студенты университета открыли центр", 2, ["Новости"]),
+                       ("Минпросвещения изменило правила ОГЭ для 9 классов", 5, ["Новости"])):
+            self.assertEqual(extras.teacher_news_line(),
+                             "📰 Учительская газета: Минпросвещения изменило правила ОГЭ для 9 классов")
+
+    def test_editors_pick_counts(self):
+        with self.feed(("Диалог о будущем образования", 3, ["Выбор дня UG.RU", "Новости"]),
+                       ("Сварщик сегодня и через три года", 1, ["Новости"])):
+            self.assertIn("Диалог о будущем образования", extras.teacher_news_line())
+
+    def test_nothing_relevant_or_fresh_means_no_line(self):
+        with self.feed(("Ректор вуза наградил студентов", 1, ["Новости"]),
+                       ("Учителям повысят оклады", 40, ["Новости"])):        # too old
+            self.assertIsNone(extras.teacher_news_line())
+
+    def test_headline_is_marked_seen_only_when_asked(self):
+        item = ("Педагоги Петербурга получат надбавку", 2, ["Новости"])
+        with self.feed(item):
+            self.assertIsNotNone(extras.teacher_news_line())
+            self.assertIsNotNone(extras.teacher_news_line())   # not marked yet: still offered
+            extras.mark_news_seen()
+            self.assertIsNone(extras.teacher_news_line())      # posted once, never again
+
+    def test_school_news_only_when_new(self):
+        cfg = {"school": "Гимназия", "news_rss": "http://school/feed"}
+        with mock.patch.object(extras, "_school_config", return_value=cfg):
+            with self.feed(("Расписание на 1 полугодие", 20, ["Новости"])):
+                self.assertEqual(extras.school_news_line(), "🏫 Новости: гимназия — Расписание на 1 полугодие")
+            with self.feed(("Старое объявление", 24 * 5, ["Новости"])):
+                self.assertIsNone(extras.school_news_line())
+        with mock.patch.object(extras, "_school_config", return_value={}):
+            self.assertIsNone(extras.school_news_line())
+
+
+class NewsMarkedAfterPost(Base):
+    def test_marked_after_success_not_after_failure(self):
+        with self.now(at(6)), mock.patch.object(f, "run_once", return_value="photo"), \
+                mock.patch.object(f, "mark_news_seen") as mark:
+            f.post_today()
+        mark.assert_called_once()
+        with self.now(at(6)), mock.patch.object(f, "run_once", side_effect=RuntimeError("down")), \
+                mock.patch.object(f, "mark_news_seen") as mark:
+            f.post_today()
+        mark.assert_not_called()
 
 
 class Ai(unittest.TestCase):

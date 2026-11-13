@@ -26,7 +26,8 @@ import config
 from ai_generator import AIDescriptionGeneratorQwenVL
 from alerts import alert, heartbeat
 from download_pics import download_random_image, purge_old_images
-from extras import MONTHS, build_extras, clothing_line, pick_photo_topic, school_calendar_expiring
+from extras import (MONTHS, build_extras, clothing_line, mark_news_seen, pick_photo_topic,
+                    school_calendar_expiring)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROFILE_DIR = os.path.join(BASE_DIR, "max_profile")
@@ -409,6 +410,7 @@ def post_today():
                 if ROLE == "standby":
                     alert("⚠️ aak-first не отправил пост к 06:40 — его отправил резервный сервер horek_fi.")
                 log("=== Готово! ===")
+                mark_news_seen()
                 if ROLE == "primary" and school_calendar_expiring():
                     alert("📚 Школьный календарь в school_calendar.json заканчивается через 2 недели. "
                           "Пришлите даты четвертей и каникул на новый учебный год.")

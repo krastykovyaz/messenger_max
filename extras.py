@@ -6,6 +6,9 @@ Every block is independent: if one fails it is skipped, the post is still sent.
 """
 import json
 import os
+import re
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from datetime import date, datetime, timedelta
 
 import requests
@@ -571,6 +574,99 @@ def school_calendar_expiring(today=None):
     return d == max(p[3] for p in loaded[1]) - timedelta(days=14)
 
 
+# ---- school news -------------------------------------------------------------
+
+TEACHER_NEWS_RSS = "https://ug.ru/feed/"   # «Учительская газета»
+NEWS_SEEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "news_seen.json")
+_pending_news = []   # headlines in the message being built; marked seen only after it is posted
+SCHOOL_WORDS = re.compile(r"школ|учител|педагог|урок|класс|ЕГЭ|ОГЭ|Минпрос|аттестац|каникул|"
+                          r"родител|выпускник|первоклас|Петербург|СПб", re.I)
+HIGHER_ED_WORDS = re.compile(r"студент|вуз|университет|колледж|СПО|академи|аспирант|ректор", re.I)
+
+
+def _fetch_rss(url, timeout=30):
+    r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 (family morning post)"})
+    r.raise_for_status()
+    items = []
+    for it in ET.fromstring(r.content).findall("./channel/item"):
+        title = re.sub(r"\s+", " ", (it.findtext("title") or "")).strip()
+        try:
+            published = parsedate_to_datetime(it.findtext("pubDate") or "")
+        except (TypeError, ValueError):
+            continue
+        if title:
+            items.append({"title": title, "published": published,
+                          "categories": [c.text or "" for c in it.findall("category")]})
+    return items
+
+
+def _news_seen():
+    try:
+        with open(NEWS_SEEN_FILE, encoding="utf-8") as f:
+            return set(json.load(f))
+    except (FileNotFoundError, ValueError):
+        return set()
+
+
+def mark_news_seen():
+    """Called after a confirmed post, so a headline that never went out can still be used."""
+    global _pending_news
+    if not _pending_news:
+        return
+    seen = list(_news_seen() | set(_pending_news))[-300:]
+    os.makedirs(os.path.dirname(NEWS_SEEN_FILE), exist_ok=True)
+    with open(NEWS_SEEN_FILE, "w", encoding="utf-8") as f:
+        json.dump(seen, f, ensure_ascii=False)
+    _pending_news = []
+
+
+def _fresh(items, hours):
+    cutoff = datetime.now().astimezone() - timedelta(hours=hours)
+    seen = _news_seen()
+    return [i for i in items if i["published"] >= cutoff and i["title"] not in seen]
+
+
+def _school_config():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "school_calendar.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def school_news_line():
+    """A new item from the school's own site (news_rss in school_calendar.json), at most 3 days old."""
+    cfg = _school_config()
+    if not cfg.get("news_rss"):
+        return None
+    items = sorted(_fresh(_fetch_rss(cfg["news_rss"]), hours=72), key=lambda i: i["published"])
+    if not items:
+        return None
+    title = items[-1]["title"]
+    _pending_news.append(title)
+    return f"🏫 Новости: {cfg.get('school', 'школа').lower()} — {title}"
+
+
+def teacher_news_score(item):
+    title, cats = item["title"], " ".join(item["categories"])
+    school = len(SCHOOL_WORDS.findall(title))
+    score = 2 * school + (3 if "Выбор дня" in cats else 0)
+    if HIGHER_ED_WORDS.search(title) and not school:
+        score -= 3
+    return score
+
+
+def teacher_news_line():
+    """The day's most school-relevant headline from «Учительская газета» (last 30 hours, not seen before)."""
+    items = [i for i in _fresh(_fetch_rss(TEACHER_NEWS_RSS), hours=30) if teacher_news_score(i) > 0]
+    if not items:
+        return None
+    best = max(items, key=lambda i: (teacher_news_score(i), i["published"]))
+    _pending_news.append(best["title"])
+    return f"📰 Учительская газета: {best['title']}"
+
+
 def _safe(fn):
     """Runs one block; a failing source drops its line, never the post."""
     try:
@@ -582,7 +678,9 @@ def _safe(fn):
 
 def build_extras():
     """Returns (top_lines, extra_lines)."""
-    top = ([_safe(date_line), _safe(day_type_line), _safe(school_line), _safe(new_year_line)]
+    del _pending_news[:]
+    top = ([_safe(date_line), _safe(day_type_line), _safe(school_line), _safe(school_news_line),
+            _safe(teacher_news_line), _safe(new_year_line)]
            + (_safe(birthday_lines) or []) + [_safe(nameday_line)])
     extra = (_safe(weather_extras) or []) + [
         _safe(kp_line),
