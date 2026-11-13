@@ -593,8 +593,16 @@ class NewsMarkedAfterPost(Base):
 class Ai(unittest.TestCase):
     def test_data_is_kept_verbatim_after_greeting(self):
         g = ai_generator.AIDescriptionGeneratorQwenVL()
-        with mock.patch.object(g, "_ollama_generate", return_value="Доброе утро! ☀️"):
-            self.assertEqual(g.generate_viral_description("line1\nline2"), "Доброе утро! ☀️\n\nline1\nline2")
+        with mock.patch.object(g, "_ollama_generate", return_value="Доброе утро! 🍂"):
+            self.assertEqual(g.generate_viral_description("line1\nline2"), "Доброе утро! 🍂\n\nline1\nline2")
+
+    def test_sun_emoji_removed_unless_clear(self):
+        g = ai_generator.AIDescriptionGeneratorQwenVL()
+        with mock.patch.object(g, "_ollama_generate", return_value="Доброе утро! 🌞✨ Хорошего дня ☀️"):
+            out = g.generate_viral_description("СПб: 1…2°C, пасмурно")
+        self.assertTrue(out.startswith("Доброе утро! ✨ Хорошего дня\n\n"), out)
+        with mock.patch.object(g, "_ollama_generate", return_value="Доброе утро! 🌞"):
+            self.assertTrue(g.generate_viral_description("СПб: 1…2°C, ясно").startswith("Доброе утро! 🌞"))
 
     def test_fallback_when_model_is_down(self):
         g = ai_generator.AIDescriptionGeneratorQwenVL()
